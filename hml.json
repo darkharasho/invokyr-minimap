@@ -1,0 +1,16 @@
+{
+  "$schema": "https://hml-share.project96.workers.dev/v1/catalog/schema.json",
+  "schema": 1,
+  "mods": [
+    {
+      "id": "minimap",
+      "name": "InvokyrMinimap",
+      "description": "A corner minimap and a large map on Tab for Invokyr: rooms your team has explored, teammates, idols, the exit and the shop. Client-side.",
+      "games": [
+        "nexus-invokyr"
+      ],
+      "icon": "thunderstore/icon.png",
+      "readme": "thunderstore/README.md"
+    }
+  ]
+}
