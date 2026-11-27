@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using _200_Dev.Entities;
 using Entities.Player;
 using EnvironmentElements;
+using Il2CppInterop.Runtime.InteropTypes.Arrays;
 using UnityEngine;
 using UnityEngine.InputSystem;
 using UnityEngine.SceneManagement;
@@ -10,17 +11,19 @@ using UnityEngine.SceneManagement;
 namespace InvokyrMinimap
 {
     /// <summary>
-    /// A corner minimap and a large map while the map key is held. The layout is the game's own room boxes
-    /// (<see cref="Room.roomBounds"/>, the triggers that tell which room an entity is in) seen from above, so nothing is
-    /// scanned or raycast. Rooms show up once anyone on the team has been in them, unless RevealAll is on.
-    /// Data is collected in Update and drawn in OnGUI with GUI.DrawTexture/GUI.Label only (IMGUI controls that need a
-    /// control id may fail to unstrip in IL2CPP builds).
+    /// A corner minimap and a large map while the map key is held. Rooms come from the game's room boxes
+    /// (<see cref="Room.roomBounds"/>); once someone on the team has been in a room (or with RevealAll) its box is scanned
+    /// with downward raycasts on a 0.4 m grid against the level's floor layers, so the map shows the real floor and walls
+    /// instead of the oversized trigger boxes. The map is painted on the CPU into a texture (<see cref="MapPainter"/>), so
+    /// it can turn with your view; OnGUI only draws textures and labels (IMGUI controls may be stripped in IL2CPP).
     /// </summary>
     public sealed class MinimapController : MonoBehaviour
     {
         public MinimapController(IntPtr ptr) : base(ptr) { }
 
         private const float ReferenceHeight = 1080f;
+        private const int CellsPerFrame = 400;
+        private const float WallRadius = 0.22f;
 
         private struct Shape
         {
@@ -30,8 +33,25 @@ namespace InvokyrMinimap
         private sealed class RoomInfo
         {
             public IntPtr Ptr;
-            public ERoomType Type;
+            public byte Flags;
             public readonly List<Shape> Boxes = new List<Shape>();
+        }
+
+        private struct Sample
+        {
+            public int Ix, Iz, Start, Count;
+        }
+
+        /// <summary>One room being scanned: each box is sampled cell by cell, then its samples are sorted into floor/pit/wall.</summary>
+        private sealed class ScanJob
+        {
+            public RoomInfo Room;
+            public int Box, Ix, Iz, Next, Found;
+            public bool Started, Sampled;
+            public float Level;
+            public readonly List<Sample> Samples = new List<Sample>();
+            public readonly List<float> Ys = new List<float>();
+            public readonly List<float> Lowest = new List<float>();
         }
 
         private struct Dot
@@ -42,26 +62,41 @@ namespace InvokyrMinimap
         }
 
         private readonly HashSet<IntPtr> _seen = new HashSet<IntPtr>();
+        private readonly HashSet<IntPtr> _queued = new HashSet<IntPtr>();
+        private readonly Queue<ScanJob> _jobs = new Queue<ScanJob>();
+        private readonly FloorGrid _grid = new FloorGrid();
         private List<RoomInfo> _rooms = new List<RoomInfo>();
         private readonly List<Dot> _players = new List<Dot>();
         private readonly List<Vector3> _idols = new List<Vector3>();
         private readonly List<Vector3> _monsters = new List<Vector3>();
         private Il2CppSystem.Collections.Generic.List<PlayerEntity> _playerBuffer;
+        private Il2CppStructArray<RaycastHit> _hits;
+        private int _mask = -1;
         private Dot _me;
         private bool _active;
         private bool _big;
+        private bool _revealAll;
         private int _sceneHandle;
         private float _nextRoomRefresh;
-        private bool _loggedError;
+        private bool _loggedError, _loggedFallback;
 
-        private Texture2D _panel, _room, _roomOther, _edge, _exit, _shop, _meTex, _mateTex, _idolTex, _monsterTex, _frame;
+        private Raster _miniRaster, _bigRaster;
+        private Texture2D _miniTex, _bigTex;
+        private Texture2D _panel, _frame;
         private GUIStyle _nameStyle;
+
+        private static readonly Rgba MeColor = Rgba.Of(1f, 0.85f, 0.35f, 1f);
+        private static readonly Rgba Outline = Rgba.Of(0.05f, 0.03f, 0.06f, 0.95f);
+        private static readonly Rgba MateColor = Rgba.Of(0.35f, 0.9f, 1f, 1f);
+        private static readonly Rgba IdolColor = Rgba.Of(1f, 0.55f, 0.1f, 1f);
+        private static readonly Rgba MonsterColor = Rgba.Of(1f, 0.25f, 0.25f, 1f);
 
         private void Update()
         {
             try
             {
                 Collect();
+                Scan();
             }
             catch (Exception e)
             {
@@ -80,11 +115,16 @@ namespace InvokyrMinimap
             }
 
             var scene = SceneManager.GetActiveScene().handle;
-            if (scene != _sceneHandle)
+            if (scene != _sceneHandle || _revealAll != Plugin.RevealAll.Value)
             {
+                if (scene != _sceneHandle)
+                    _seen.Clear();
                 _sceneHandle = scene;
-                _seen.Clear();
+                _revealAll = Plugin.RevealAll.Value;
                 _rooms.Clear();
+                _queued.Clear();
+                _jobs.Clear();
+                _grid.Clear();
                 _nextRoomRefresh = 0f;
             }
             if (Time.unscaledTime >= _nextRoomRefresh)
@@ -106,13 +146,22 @@ namespace InvokyrMinimap
                 var room = player.currentRoom;
                 if (room != null)
                     _seen.Add(room.Pointer);
-                var t = player.transform;
-                var p = t.position;
-                var f = t.forward;
-                var dot = new Dot { X = p.x, Y = p.y, Z = p.z, Fx = f.x, Fz = f.z, Me = player.Pointer == me.Pointer, Name = player.playerNick };
+                var p = player.transform.position;
+                var dot = new Dot { X = p.x, Y = p.y, Z = p.z, Me = player.Pointer == me.Pointer, Name = player.playerNick };
                 if (dot.Me)
+                {
+                    var f = LookDirection(player);
+                    dot.Fx = f.x;
+                    dot.Fz = f.z;
                     _me = dot;
+                }
                 _players.Add(dot);
+            }
+
+            foreach (var room in _rooms)
+            {
+                if (Visible(room) && _queued.Add(room.Ptr))
+                    _jobs.Enqueue(new ScanJob { Room = room });
             }
 
             _idols.Clear();
@@ -146,6 +195,22 @@ namespace InvokyrMinimap
             _active = true;
         }
 
+        /// <summary>Where you are looking, flattened: the camera if there is one, else the player's look transform, else the body.</summary>
+        private static Vector3 LookDirection(PlayerEntity player)
+        {
+            var cam = Camera.main;
+            Vector3 f;
+            if (cam != null)
+                f = cam.transform.forward;
+            else
+            {
+                var look = player.playerCameraController?.PlayerLook;
+                f = look != null ? look.forward : player.transform.forward;
+            }
+            f.y = 0f;
+            return f.sqrMagnitude > 1e-6f ? f.normalized : Vector3.forward;
+        }
+
         private static List<RoomInfo> ReadRooms()
         {
             var result = new List<RoomInfo>();
@@ -155,7 +220,9 @@ namespace InvokyrMinimap
                 var room = rooms[i];
                 if (room == null)
                     continue;
-                var info = new RoomInfo { Ptr = room.Pointer, Type = room.roomType };
+                var type = room.roomType;
+                var flags = (type & ERoomType.EndRoom) != 0 ? MapPainter.Exit : (type & ERoomType.ShopRoom) != 0 ? MapPainter.Shop : (byte)0;
+                var info = new RoomInfo { Ptr = room.Pointer, Flags = flags };
                 var bounds = room.roomBounds;
                 for (var b = 0; bounds != null && b < bounds.Count; b++)
                 {
@@ -168,6 +235,139 @@ namespace InvokyrMinimap
                     result.Add(info);
             }
             return result;
+        }
+
+        // Layers the level's floors and walls are on; props, entities and triggers are left out so furniture reads as floor.
+        private int Mask()
+        {
+            if (_mask != -1)
+                return _mask;
+            var mask = 0;
+            foreach (var name in new[] { "Default", "Ground", "Wood", "Carpet", "Tile" })
+            {
+                var layer = LayerMask.NameToLayer(name);
+                if (layer >= 0)
+                    mask |= 1 << layer;
+            }
+            _mask = mask == 0 ? Physics.DefaultRaycastLayers : mask;
+            return _mask;
+        }
+
+        /// <summary>Works through the queued rooms a few hundred cells per frame, writing the results into the floor grid.</summary>
+        private void Scan()
+        {
+            if (!_active)
+                return;
+            _hits ??= new Il2CppStructArray<RaycastHit>(16);
+            var budget = CellsPerFrame;
+            while (budget > 0 && _jobs.Count > 0)
+            {
+                var job = _jobs.Peek();
+                var boxes = job.Room.Boxes;
+                if (job.Box >= boxes.Count)
+                {
+                    _jobs.Dequeue();
+                    if (job.Found == 0)
+                        FillBoxes(job.Room);
+                    continue;
+                }
+                var b = boxes[job.Box];
+                if (!job.Started)
+                {
+                    job.Started = true;
+                    job.Sampled = false;
+                    job.Ix = FloorGrid.Index(b.MinX);
+                    job.Iz = FloorGrid.Index(b.MinZ);
+                    job.Next = 0;
+                    job.Samples.Clear();
+                    job.Ys.Clear();
+                    job.Lowest.Clear();
+                }
+                if (!job.Sampled)
+                {
+                    if (job.Iz > FloorGrid.Index(b.MaxZ))
+                    {
+                        job.Sampled = true;
+                        job.Level = FloorClassifier.Level(job.Lowest);
+                        continue;
+                    }
+                    SampleCell(job, b);
+                    budget--;
+                    if (++job.Ix > FloorGrid.Index(b.MaxX))
+                    {
+                        job.Ix = FloorGrid.Index(b.MinX);
+                        job.Iz++;
+                    }
+                    continue;
+                }
+                if (job.Next >= job.Samples.Count)
+                {
+                    job.Box++;
+                    job.Started = false;
+                    continue;
+                }
+                if (ClassifyCell(job, b, job.Samples[job.Next++]))
+                    job.Found++;
+                budget--;
+            }
+        }
+
+        // Every upward-facing surface under the cell's centre, from the top of the box to a metre below it.
+        private void SampleCell(ScanJob job, Shape b)
+        {
+            var x = FloorGrid.Center(job.Ix);
+            var z = FloorGrid.Center(job.Iz);
+            if (x < b.MinX || x > b.MaxX || z < b.MinZ || z > b.MaxZ)
+                return;
+            var top = b.MaxY + 0.1f;
+            var n = Physics.RaycastNonAlloc(new Ray(new Vector3(x, top, z), Vector3.down), _hits, top - b.MinY + 1f, Mask(), QueryTriggerInteraction.Ignore);
+            var start = job.Ys.Count;
+            var lowest = float.MaxValue;
+            for (var i = 0; i < n; i++)
+            {
+                var hit = _hits[i];
+                if (hit.normal.y < 0.7f)
+                    continue;
+                job.Ys.Add(hit.point.y);
+                lowest = Math.Min(lowest, hit.point.y);
+            }
+            job.Samples.Add(new Sample { Ix = job.Ix, Iz = job.Iz, Start = start, Count = job.Ys.Count - start });
+            if (lowest < float.MaxValue)
+                job.Lowest.Add(lowest);
+        }
+
+        private bool ClassifyCell(ScanJob job, Shape b, Sample s)
+        {
+            var kind = FloorClassifier.Classify(job.Ys, s.Start, s.Count, job.Level, out var y);
+            if (kind == CellKind.None)
+                return false;
+            var x = FloorGrid.Center(s.Ix);
+            var z = FloorGrid.Center(s.Iz);
+            // Something solid at chest height over the floor is a wall (props and entities are on other layers).
+            if (kind == CellKind.Floor &&
+                Physics.CheckCapsule(new Vector3(x, y + 0.7f, z), new Vector3(x, y + 1.6f, z), WallRadius, Mask(), QueryTriggerInteraction.Ignore))
+                kind = CellKind.Wall;
+            if (kind != CellKind.Floor)
+                y = job.Level;
+            var depth = Math.Min(Math.Min(x - b.MinX, b.MaxX - x), Math.Min(z - b.MinZ, b.MaxZ - z));
+            _grid.Add(s.Ix, s.Iz, new Cell { Kind = kind, Flags = job.Room.Flags, Y = y, Depth = depth });
+            return true;
+        }
+
+        // A room whose scan found no floor at all (unexpected layers) still shows, as its boxes.
+        private void FillBoxes(RoomInfo room)
+        {
+            if (!_loggedFallback)
+            {
+                _loggedFallback = true;
+                Plugin.Log.LogWarning("Minimap: a room's floor scan found nothing; showing its room box instead.");
+            }
+            foreach (var b in room.Boxes)
+            {
+                for (var iz = FloorGrid.Index(b.MinZ); iz <= FloorGrid.Index(b.MaxZ); iz++)
+                    for (var ix = FloorGrid.Index(b.MinX); ix <= FloorGrid.Index(b.MaxX); ix++)
+                        _grid.Add(ix, iz, new Cell { Kind = CellKind.Floor, Flags = room.Flags, Y = b.MinY, Depth = 0f });
+            }
         }
 
         private static bool MapKeyHeld()
@@ -191,9 +391,9 @@ namespace InvokyrMinimap
                 GUI.matrix = Matrix4x4.Scale(new Vector3(scale, scale, 1f));
                 var width = Screen.width / scale;
                 if (_big)
-                    DrawBig(width);
+                    DrawBig(width, scale);
                 else if (Plugin.ShowMinimap.Value)
-                    DrawMini(width);
+                    DrawMini(width, scale);
             }
             catch (Exception e)
             {
@@ -205,20 +405,27 @@ namespace InvokyrMinimap
             }
         }
 
-        private void DrawMini(float width)
+        private bool Rotate => Plugin.RotateWithView.Value;
+
+        private void DrawMini(float width, float scale)
         {
             var size = Mathf.Clamp(Plugin.MinimapSize.Value, 120f, 500f);
-            var screen = new Box(width - size - 24f, 24f, size, size);
+            var screen = Layout.Corner(Plugin.MinimapCorner.Value, size, Plugin.OffsetX.Value, Plugin.OffsetY.Value, width, ReferenceHeight);
+            var px = Mathf.Clamp(Mathf.RoundToInt(size * scale), 64, 600);
+            EnsureRaster(ref _miniRaster, ref _miniTex, px);
             var radius = Mathf.Max(5f, Plugin.MinimapRange.Value);
-            var view = new MapView(screen, _me.X, _me.Z, size / (2f * radius));
-            DrawFrame(screen);
-            DrawMap(view, names: false);
+            var view = Rotate
+                ? new MapView(new Box(0, 0, px, px), _me.X, _me.Z, px / (2f * radius), _me.Fx, _me.Fz)
+                : new MapView(new Box(0, 0, px, px), _me.X, _me.Z, px / (2f * radius));
+            Draw(screen, view, _miniRaster, _miniTex, names: false);
         }
 
-        private void DrawBig(float width)
+        private void DrawBig(float width, float scale)
         {
             var size = ReferenceHeight * 0.8f;
             var screen = new Box((width - size) / 2f, (ReferenceHeight - size) / 2f, size, size);
+            var px = Mathf.Clamp(Mathf.RoundToInt(size * scale), 128, 720);
+            EnsureRaster(ref _bigRaster, ref _bigTex, px);
             float minX = _me.X - 20f, minZ = _me.Z - 20f, maxX = _me.X + 20f, maxZ = _me.Z + 20f;
             foreach (var room in _rooms)
             {
@@ -232,101 +439,99 @@ namespace InvokyrMinimap
                     maxZ = Math.Max(maxZ, b.MaxZ);
                 }
             }
-            var view = MapView.Fit(screen, minX, minZ, maxX, maxZ);
-            DrawFrame(screen);
-            DrawMap(view, names: true);
-        }
-
-        private bool Visible(RoomInfo room) => Plugin.RevealAll.Value || _seen.Contains(room.Ptr);
-
-        private bool SameFloor(Shape b) => _me.Y >= b.MinY - 1.5f && _me.Y <= b.MaxY + 1.5f;
-
-        private void DrawFrame(Box screen)
-        {
-            GUI.DrawTexture(Rect(new Box(screen.X - 2f, screen.Y - 2f, screen.W + 4f, screen.H + 4f)), _frame);
-            GUI.DrawTexture(Rect(screen), _panel);
-        }
-
-        private void DrawMap(MapView view, bool names)
-        {
-            // Other floors first and faint, then this floor on top.
-            for (var pass = 0; pass < 2; pass++)
+            var target = new Box(0, 0, px, px);
+            MapView view;
+            if (Rotate)
             {
-                foreach (var room in _rooms)
-                {
-                    if (!Visible(room))
-                        continue;
-                    var fill = (room.Type & ERoomType.EndRoom) != 0 ? _exit : (room.Type & ERoomType.ShopRoom) != 0 ? _shop : _room;
-                    foreach (var b in room.Boxes)
-                    {
-                        var same = SameFloor(b);
-                        if (same != (pass == 1))
-                            continue;
-                        var box = view.Project(b.MinX, b.MinZ, b.MaxX, b.MaxZ);
-                        if (box.Empty)
-                            continue;
-                        GUI.DrawTexture(Rect(box), same ? fill : _roomOther);
-                        if (same)
-                            Outline(view, b);
-                    }
-                }
+                // Fit the bounds' circle so the zoom stays put while you turn.
+                var half = Mathf.Sqrt((maxX - minX) * (maxX - minX) + (maxZ - minZ) * (maxZ - minZ)) / 2f;
+                view = new MapView(target, (minX + maxX) / 2f, (minZ + maxZ) / 2f, px / (2f * Math.Max(1f, half)) * 0.94f, _me.Fx, _me.Fz);
             }
+            else
+                view = MapView.Fit(target, minX, minZ, maxX, maxZ);
+            Draw(screen, view, _bigRaster, _bigTex, names: true);
+        }
+
+        private void Draw(Box screen, MapView view, Raster raster, Texture2D texture, bool names)
+        {
+            MapPainter.Paint(raster, _grid, view, _me.Y);
+            var k = raster.Width / screen.W; // raster pixels per GUI pixel
 
             foreach (var p in _monsters)
-                Marker(view, p.x, p.z, 7f, _monsterTex);
+                Mark(view, p.x, p.z, (cx, cy) => raster.FillSquare(cx, cy, 3.5f * k, MonsterColor));
             foreach (var p in _idols)
-                Marker(view, p.x, p.z, 9f, _idolTex);
+                Mark(view, p.x, p.z, (cx, cy) =>
+                {
+                    raster.FillDiamond(cx, cy, 7f * k, Outline);
+                    raster.FillDiamond(cx, cy, 5.5f * k, IdolColor);
+                });
             foreach (var p in _players)
             {
                 if (p.Me)
                     continue;
-                Marker(view, p.X, p.Z, 10f, _mateTex);
-                if (names && !string.IsNullOrEmpty(p.Name) && view.Screen.Contains(view.ScreenX(p.X), view.ScreenY(p.Z)))
-                    GUI.Label(new Rect(view.ScreenX(p.X) + 8f, view.ScreenY(p.Z) - 11f, 220f, 22f), p.Name, _nameStyle);
-            }
-
-            // You: a dot with three smaller ones trailing out the way you face.
-            var len = Mathf.Sqrt(_me.Fx * _me.Fx + _me.Fz * _me.Fz);
-            if (len > 0.01f)
-            {
-                for (var i = 1; i <= 3; i++)
+                Mark(view, p.X, p.Z, (cx, cy) =>
                 {
-                    var d = (5f + i * 5f) / view.Scale;
-                    Marker(view, _me.X + _me.Fx / len * d, _me.Z + _me.Fz / len * d, 6f - i, _meTex);
-                }
+                    raster.FillCircle(cx, cy, 6.5f * k, Outline);
+                    raster.FillCircle(cx, cy, 5f * k, MateColor);
+                });
             }
-            Marker(view, _me.X, _me.Z, 12f, _meTex);
-        }
 
-        private void Outline(MapView view, Shape b)
-        {
-            const float t = 1.5f;
-            var x0 = view.ScreenX(b.MinX);
-            var x1 = view.ScreenX(b.MaxX);
-            var y0 = view.ScreenY(b.MaxZ);
-            var y1 = view.ScreenY(b.MinZ);
-            foreach (var edge in new[]
-            {
-                new Box(x0, y0, x1 - x0, t), new Box(x0, y1 - t, x1 - x0, t),
-                new Box(x0, y0, t, y1 - y0), new Box(x1 - t, y0, t, y1 - y0),
-            })
-            {
-                var clipped = edge.Intersect(view.Screen);
-                if (!clipped.Empty)
-                    GUI.DrawTexture(Rect(clipped), _edge);
-            }
-        }
+            // You: an arrow the way you look (always up when the map turns with you).
+            view.Direction(_me.Fx, _me.Fz, out var dx, out var dy);
+            var mx = view.ScreenX(_me.X, _me.Z);
+            var my = view.ScreenY(_me.X, _me.Z);
+            raster.FillArrow(mx, my, dx, dy, 22f * k, Outline);
+            raster.FillArrow(mx, my, dx, dy, 16f * k, MeColor);
 
-        private static void Marker(MapView view, float x, float z, float size, Texture2D texture)
-        {
-            var sx = view.ScreenX(x);
-            var sy = view.ScreenY(z);
-            if (!view.Screen.Contains(sx, sy))
+            Upload(raster, texture);
+            GUI.DrawTexture(new Rect(screen.X - 2f, screen.Y - 2f, screen.W + 4f, screen.H + 4f), _frame);
+            GUI.DrawTexture(new Rect(screen.X, screen.Y, screen.W, screen.H), _panel);
+            GUI.DrawTexture(new Rect(screen.X, screen.Y, screen.W, screen.H), texture);
+
+            if (!names)
                 return;
-            GUI.DrawTexture(new Rect(sx - size / 2f, sy - size / 2f, size, size), texture);
+            foreach (var p in _players)
+            {
+                if (p.Me || string.IsNullOrEmpty(p.Name))
+                    continue;
+                var sx = view.ScreenX(p.X, p.Z);
+                var sy = view.ScreenY(p.X, p.Z);
+                if (view.Screen.Contains(sx, sy))
+                    GUI.Label(new Rect(screen.X + sx / k + 9f, screen.Y + sy / k - 11f, 220f, 22f), p.Name, _nameStyle);
+            }
         }
 
-        private static Rect Rect(Box b) => new Rect(b.X, b.Y, b.W, b.H);
+        private static void Mark(MapView view, float x, float z, Action<float, float> draw)
+        {
+            var sx = view.ScreenX(x, z);
+            var sy = view.ScreenY(x, z);
+            if (view.Screen.Contains(sx, sy))
+                draw(sx, sy);
+        }
+
+        private bool Visible(RoomInfo room) => _revealAll || _seen.Contains(room.Ptr);
+
+        private static void EnsureRaster(ref Raster raster, ref Texture2D texture, int size)
+        {
+            if (raster != null && raster.Width == size && texture != null)
+                return;
+            raster = new Raster(size, size);
+            if (texture != null)
+                Destroy(texture);
+            texture = new Texture2D(size, size, TextureFormat.RGBA32, false)
+            {
+                hideFlags = HideFlags.HideAndDontSave,
+                filterMode = FilterMode.Bilinear,
+                wrapMode = TextureWrapMode.Clamp,
+            };
+        }
+
+        private static unsafe void Upload(Raster raster, Texture2D texture)
+        {
+            fixed (byte* p = raster.Pixels)
+                texture.LoadRawTextureData((IntPtr)p, raster.Pixels.Length);
+            texture.Apply(false);
+        }
 
         private void EnsureTextures()
         {
@@ -334,15 +539,6 @@ namespace InvokyrMinimap
                 return;
             _panel = Solid(new Color(0.05f, 0.03f, 0.06f, 0.72f));
             _frame = Solid(new Color(0.94f, 0.78f, 0.37f, 0.9f));
-            _room = Solid(new Color(0.42f, 0.38f, 0.48f, 0.85f));
-            _roomOther = Solid(new Color(0.42f, 0.38f, 0.48f, 0.25f));
-            _edge = Solid(new Color(0.85f, 0.82f, 0.9f, 0.9f));
-            _exit = Solid(new Color(0.25f, 0.62f, 0.35f, 0.9f));
-            _shop = Solid(new Color(0.25f, 0.45f, 0.75f, 0.9f));
-            _meTex = Solid(new Color(1f, 0.85f, 0.35f, 1f));
-            _mateTex = Solid(new Color(0.35f, 0.9f, 1f, 1f));
-            _idolTex = Solid(new Color(1f, 0.55f, 0.1f, 1f));
-            _monsterTex = Solid(new Color(1f, 0.25f, 0.25f, 1f));
             _nameStyle = new GUIStyle { fontSize = 16, fontStyle = FontStyle.Bold };
             _nameStyle.normal.textColor = new Color(0.35f, 0.9f, 1f, 1f);
         }

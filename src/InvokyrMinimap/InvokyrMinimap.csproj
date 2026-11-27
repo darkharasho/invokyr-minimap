@@ -4,7 +4,7 @@
     <TargetFramework>net6.0</TargetFramework>
     <AssemblyName>InvokyrMinimap</AssemblyName>
     <RootNamespace>InvokyrMinimap</RootNamespace>
-    <Version>1.0.1</Version>
+    <Version>1.1.0</Version>
     <LangVersion>latest</LangVersion>
     <Nullable>disable</Nullable>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
@@ -39,6 +39,7 @@
     <Reference Include="vhs" HintPath="$(InteropPath)/vhs.dll" Private="false" />
     <Reference Include="Mirror" HintPath="$(InteropPath)/Mirror.dll" Private="false" />
     <Reference Include="UnityEngine.CoreModule" HintPath="$(InteropPath)/UnityEngine.CoreModule.dll" Private="false" />
+    <Reference Include="UnityEngine.PhysicsModule" HintPath="$(InteropPath)/UnityEngine.PhysicsModule.dll" Private="false" />
     <Reference Include="UnityEngine.IMGUIModule" HintPath="$(InteropPath)/UnityEngine.IMGUIModule.dll" Private="false" />
     <Reference Include="UnityEngine.TextRenderingModule" HintPath="$(InteropPath)/UnityEngine.TextRenderingModule.dll" Private="false" />
     <Reference Include="UnityEngine.UI" HintPath="$(InteropPath)/UnityEngine.UI.dll" Private="false" />

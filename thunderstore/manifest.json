@@ -1,6 +1,6 @@
 {
     "name": "InvokyrMinimap",
-    "version_number": "1.0.1",
+    "version_number": "1.1.0",
     "website_url": "https://github.com/darkharasho/invokyr-minimap",
     "description": "A corner minimap and a large map on Tab for Invokyr: rooms your team has explored, teammates, idols, the exit and the shop. Client-side.",
     "dependencies": [

@@ -3,10 +3,11 @@
 A BepInEx 6 (BepInEx.Unity.IL2CPP, be.755) mod for Invokyr (Unity 6000.3, IL2CPP): a corner minimap and a large map while Tab is held. Client-side only. Game code is in `vhs.dll`. Packaged Thunderstore-style under `darkharasho`, released on GitHub. Build setup is shared with `invokyr-admin-menu` (see its CLAUDE.md for refs, packaging and the flat zip layout HML needs).
 
 ## How it works (`MinimapController.cs`)
-- Layout: `EnvironmentElements.Room.GetAll()` and each room's `roomBounds` (List<Bounds>, the room triggers), drawn top-down as rectangles; refreshed every 2 s since rooms stream in. `Room.roomType` flags mark EndRoom (exit) and ShopRoom. Rooms count as seen once any player's `currentRoom` was them (cleared on scene change); `RevealAll` shows all.
-- Floors: a box is "this floor" if the local player's Y is within its Y range ±1.5 m; others are drawn faint.
+- Rooms: `EnvironmentElements.Room.GetAll()` and each room's `roomBounds` (List<Bounds>, the room triggers; they overlap and are bigger than the rooms), refreshed every 2 s since rooms stream in. `Room.roomType` flags mark EndRoom (exit) and ShopRoom. Rooms count as seen once any player's `currentRoom` was them (cleared on scene change); `RevealAll` shows all.
+- Shapes: each seen room's boxes are raycast on a 0.4 m grid (`FloorGrid`), 400 cells/frame, against layers Default/Ground/Wood/Carpet/Tile (props and entities excluded). `FloorClassifier`: the box's level is the median lowest up-facing hit; a cell is floor near it, pit if only below, wall if only above or if `CheckCapsule` at 0.7–1.6 m hits. Overlaps go to the room the cell is deepest inside. A room with no hits falls back to its boxes.
+- Painting: `MapPainter` fills a `Raster` (CPU RGBA, rows bottom-up) per pixel through `MapView` (which turns so the look direction is up when `RotateWithView`), markers are rasterized on top, then `Texture2D.LoadRawTextureData` + Apply. Look direction is `Camera.main`, falling back to `playerCameraController.PlayerLook`. Floors: a cell is "this floor" within 2 m of the player's Y.
 - Players: `EntityManager.Me`, `EntityManager.GetAllPlayersNoAlloc(Il2Cpp List)`. Idols: `EntityManager.Instance.Idols` (Il2Cpp HashSet<ScoreTool>, needs the Il2CppSystem.Core reference). Monsters: `EntityManager.Instance.MonsterEntities`.
-- Drawing: OnGUI Repaint only, `GUI.DrawTexture`/`GUI.Label` with manual clipping (`MapView.cs`, tested), no IMGUI controls or groups. Facing is shown with trailing dots, so no rotation is needed.
+- Drawing: OnGUI Repaint only, `GUI.DrawTexture`/`GUI.Label` with manual clipping (`MapView.cs`, tested), no IMGUI controls or groups. Rotation happens in the raster, since IMGUI can't clip rotated rects. Placement: `Layout.Corner` (Corner, OffsetX/OffsetY at 1080p).
 - Hidden while the cursor is free (menus) when HideInMenus is on. Map key read from the Input System (`Keyboard.current`).
 
 ## Building

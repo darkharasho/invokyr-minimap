@@ -9,6 +9,9 @@
 
   <ItemGroup>
     <Compile Include="../../src/InvokyrMinimap/MapView.cs" Link="MapView.cs" />
+    <Compile Include="../../src/InvokyrMinimap/FloorGrid.cs" Link="FloorGrid.cs" />
+    <Compile Include="../../src/InvokyrMinimap/Raster.cs" Link="Raster.cs" />
+    <Compile Include="../../src/InvokyrMinimap/MapPainter.cs" Link="MapPainter.cs" />
   </ItemGroup>
 
   <ItemGroup>
