@@ -12,6 +12,7 @@
     <Compile Include="../../src/InvokyrMinimap/FloorGrid.cs" Link="FloorGrid.cs" />
     <Compile Include="../../src/InvokyrMinimap/Raster.cs" Link="Raster.cs" />
     <Compile Include="../../src/InvokyrMinimap/MapPainter.cs" Link="MapPainter.cs" />
+    <Compile Include="../../src/InvokyrMinimap/RoomTracker.cs" Link="RoomTracker.cs" />
   </ItemGroup>
 
   <ItemGroup>

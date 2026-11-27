@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using _200_Dev.Entities;
 using Entities.Player;
 using EnvironmentElements;
+using Il2CppInterop.Runtime;
 using Il2CppInterop.Runtime.InteropTypes.Arrays;
 using UnityEngine;
 using UnityEngine.InputSystem;
@@ -94,6 +95,10 @@ namespace InvokyrMinimap
         private readonly Dictionary<IntPtr, ushort> _roomIds = new Dictionary<IntPtr, ushort>();
         private readonly Queue<ScanJob> _jobs = new Queue<ScanJob>();
         private readonly FloorGrid _grid = new FloorGrid();
+        private readonly RoomTracker _tracker = new RoomTracker();
+        private Il2CppSystem.Action<Room> _onContentChanged;
+        private readonly HashSet<IntPtr> _contentChanged = new HashSet<IntPtr>();
+        private ushort _nextRoomId;
         private List<RoomInfo> _rooms = new List<RoomInfo>();
         private readonly List<Dot> _players = new List<Dot>();
         private readonly List<Vector3> _idols = new List<Vector3>();
@@ -151,6 +156,9 @@ namespace InvokyrMinimap
                     _seen.Clear();
                     _stoodY.Clear();
                     _roomIds.Clear();
+                    _nextRoomId = 0;
+                    _tracker.Clear();
+                    WatchRoomContent();
                 }
                 _sceneHandle = scene;
                 _revealAll = Plugin.RevealAll.Value;
@@ -165,6 +173,7 @@ namespace InvokyrMinimap
                 // Rooms register as the level streams in, so the list is refreshed now and then.
                 _nextRoomRefresh = Time.unscaledTime + 2f;
                 _rooms = ReadRooms();
+                CheckForLevelSwap();
             }
 
             _players.Clear();
@@ -262,6 +271,59 @@ namespace InvokyrMinimap
             return f.sqrMagnitude > 1e-6f ? f.normalized : Vector3.forward;
         }
 
+        // Levels swap inside the same scene: when rooms disappear, change shape or rebuild their content, the map
+        // is cleared and the rooms still there are scanned again. Gone rooms are forgotten, since a new room can
+        // reuse their address.
+        private void CheckForLevelSwap()
+        {
+            var shapes = new Dictionary<long, int>();
+            var corners = new List<float>();
+            foreach (var room in _rooms)
+            {
+                corners.Clear();
+                foreach (var b in room.Boxes)
+                    corners.AddRange(new[] { b.MinX, b.MinY, b.MinZ, b.MaxX, b.MaxY, b.MaxZ });
+                shapes[room.Ptr.ToInt64()] = RoomTracker.Shape(corners);
+            }
+            var changed = _tracker.Update(shapes);
+            // A seen room that rebuilt its content (a skin or biome swap) needs scanning again too.
+            var rebuilt = 0;
+            foreach (var ptr in _contentChanged)
+            {
+                if (_queued.Contains(ptr))
+                    rebuilt++;
+            }
+            _contentChanged.Clear();
+            if (changed.Count == 0 && rebuilt == 0)
+                return;
+            foreach (var key in changed)
+            {
+                var ptr = new IntPtr(key);
+                _seen.Remove(ptr);
+                _stoodY.Remove(ptr);
+                _roomIds.Remove(ptr);
+            }
+            Plugin.Log.LogInfo($"Minimap: level changed ({changed.Count} rooms gone or reshaped, {rebuilt} rebuilt); map rebuilt");
+            _queued.Clear();
+            _jobs.Clear();
+            _grid.Clear();
+        }
+
+        // The game's static room events are reset with each scene, so the handler is added again on scene change.
+        private void WatchRoomContent()
+        {
+            try
+            {
+                _onContentChanged ??= DelegateSupport.ConvertDelegate<Il2CppSystem.Action<Room>>(new Action<Room>(room => { if (room != null) _contentChanged.Add(room.Pointer); }));
+                Room.remove_RuntimeContentChanged(_onContentChanged);
+                Room.add_RuntimeContentChanged(_onContentChanged);
+            }
+            catch (Exception e)
+            {
+                LogOnce("room content events", e);
+            }
+        }
+
         private List<RoomInfo> ReadRooms()
         {
             var result = new List<RoomInfo>();
@@ -275,7 +337,7 @@ namespace InvokyrMinimap
                 var flags = (type & ERoomType.EndRoom) != 0 ? MapPainter.Exit : (type & ERoomType.ShopRoom) != 0 ? MapPainter.Shop : (byte)0;
                 if (!_roomIds.TryGetValue(room.Pointer, out var id))
                 {
-                    id = (ushort)(_roomIds.Count + 1);
+                    id = ++_nextRoomId;
                     _roomIds[room.Pointer] = id;
                 }
                 var info = new RoomInfo { Ptr = room.Pointer, Id = id, Flags = flags };

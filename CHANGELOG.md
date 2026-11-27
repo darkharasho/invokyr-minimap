@@ -1,5 +1,8 @@
 # Changelog
 
+## 1.1.3
+- The map now updates when the level changes. Levels are swapped inside the same game scene (after the chessboard, for example), so the old map stayed up; now rooms that disappear or change are noticed and the map is rebuilt.
+
 ## 1.1.2
 - Rooms above another room no longer show as faint and without outlines: a room's floor height now comes from where players stood in it, not the lowest surface under it.
 - New `Background` setting: Dark (the see-through default), Black or Tan behind the maps.
