@@ -16,6 +16,8 @@ namespace InvokyrMinimap
     /// <summary>The corner the minimap sits in.</summary>
     public enum MapCorner { TopRight, TopLeft, BottomRight, BottomLeft }
 
+    public enum MapBackground { Dark, Black, Tan }
+
     internal static class Layout
     {
         /// <summary>A size×size box in <paramref name="corner"/> of a width×height screen, offset inwards from both edges.</summary>

@@ -10,13 +10,14 @@ namespace InvokyrMinimap
     {
         public const string PluginGuid = "com.darkharasho.invokyr.minimap";
         public const string PluginName = "InvokyrMinimap";
-        public const string PluginVersion = "1.1.1";
+        public const string PluginVersion = "1.1.2";
 
         internal static new ManualLogSource Log;
         internal static ConfigEntry<bool> Enabled, ShowMinimap, RevealAll, ShowIdols, ShowMonsters, HideWhenCursorFree, RotateWithView;
         internal static ConfigEntry<string> MapKey;
         internal static ConfigEntry<float> MinimapSize, MinimapRange, OffsetX, OffsetY;
         internal static ConfigEntry<MapCorner> MinimapCorner;
+        internal static ConfigEntry<MapBackground> Background;
 
         public override void Load()
         {
@@ -41,6 +42,9 @@ namespace InvokyrMinimap
             MinimapRange = Config.Bind("Minimap", "Range", 30f, new ConfigDescription(
                 "Metres from you to the edge of the small map.",
                 new AcceptableValueRange<float>(5f, 150f), new ConfigurationManagerAttributes { DispName = "Minimap range", Order = 15 }));
+            Background = Config.Bind("Map", "Background", MapBackground.Dark, new ConfigDescription(
+                "What's behind the map: Dark (see-through), Black or Tan.",
+                null, new ConfigurationManagerAttributes { DispName = "Background", Order = 14 }));
             RotateWithView = Bind("Map", "RotateWithView", true, "Turn the maps with your view, so the way you look is always up. Off: north is up and your arrow turns.", 14);
             RevealAll = Bind("Map", "RevealAll", false, "Show every room from the start instead of only rooms someone on the team has been in.", 13);
             ShowIdols = Bind("Map", "ShowIdols", false, "Mark idols.", 12);

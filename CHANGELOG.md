@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.1.2
+- Rooms above another room no longer show as faint and without outlines: a room's floor height now comes from where players stood in it, not the lowest surface under it.
+- New `Background` setting: Dark (the see-through default), Black or Tan behind the maps.
+
 ## 1.1.1
 - Room outlines are back, now around the real room shapes: a light line where floor meets empty space or another room.
 - Revived teammates no longer leave a stale copy on the map: switched-off player objects are skipped, and when two share a name the living one is drawn.

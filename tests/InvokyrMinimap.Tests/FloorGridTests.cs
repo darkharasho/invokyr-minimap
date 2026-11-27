@@ -64,6 +64,23 @@ public class FloorClassifierTests
         FloorClassifier.Classify(new System.Collections.Generic.List<float>(hits), 0, hits.Length, level, out y);
 
     [Fact]
+    public void LevelFollowsWherePlayersStoodOverALowerFloor()
+    {
+        // The box reaches down into the room below, so every spot's lowest hit is the lower floor at -4.
+        var lowest = new System.Collections.Generic.List<float> { -4f, -4f, -4f, -4f, -4f, -4f };
+        var near = new System.Collections.Generic.List<float> { 0f, 0f, 0.02f, 0f, -0.01f };
+        Assert.Equal(0f, FloorClassifier.Level(lowest, near), 1);
+    }
+
+    [Fact]
+    public void LevelIgnoresTooFewSpotsNearWherePlayersStood()
+    {
+        var lowest = new System.Collections.Generic.List<float> { 1f, 1f, 1f, 1f, 1f, 1f, 1f, 1f, 1f, 1f, 1f, 1f, 1f };
+        var near = new System.Collections.Generic.List<float> { 2.2f, 2.2f, 2.2f };
+        Assert.Equal(1f, FloorClassifier.Level(lowest, near), 2);
+    }
+
+    [Fact]
     public void LevelIsTheMedianSoPitsDoNotMoveIt()
     {
         Assert.Equal(1f, FloorClassifier.Level(new System.Collections.Generic.List<float> { 1f, 1f, -4f, 1.02f, 0.98f }), 2);

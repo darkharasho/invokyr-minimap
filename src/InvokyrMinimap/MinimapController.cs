@@ -53,6 +53,8 @@ namespace InvokyrMinimap
             public readonly List<Sample> Samples = new List<Sample>();
             public readonly List<float> Ys = new List<float>();
             public readonly List<float> Lowest = new List<float>();
+            public readonly List<float> Near = new List<float>();   // per spot, the surface closest to where a player stood
+            public float? Stood;
         }
 
         private struct Dot
@@ -87,6 +89,7 @@ namespace InvokyrMinimap
         }
 
         private readonly HashSet<IntPtr> _seen = new HashSet<IntPtr>();
+        private readonly Dictionary<IntPtr, float> _stoodY = new Dictionary<IntPtr, float>();   // a player's height when first in the room
         private readonly HashSet<IntPtr> _queued = new HashSet<IntPtr>();
         private readonly Dictionary<IntPtr, ushort> _roomIds = new Dictionary<IntPtr, ushort>();
         private readonly Queue<ScanJob> _jobs = new Queue<ScanJob>();
@@ -108,7 +111,7 @@ namespace InvokyrMinimap
 
         private Raster _miniRaster, _bigRaster;
         private Texture2D _miniTex, _bigTex;
-        private Texture2D _panel, _frame;
+        private Texture2D _panel, _blackPanel, _tanPanel, _frame;
         private GUIStyle _nameStyle;
 
         private static readonly Rgba MeColor = Rgba.Of(1f, 0.85f, 0.35f, 1f);
@@ -146,6 +149,7 @@ namespace InvokyrMinimap
                 if (scene != _sceneHandle)
                 {
                     _seen.Clear();
+                    _stoodY.Clear();
                     _roomIds.Clear();
                 }
                 _sceneHandle = scene;
@@ -180,9 +184,13 @@ namespace InvokyrMinimap
                     continue;
                 }
                 var room = player.currentRoom;
-                if (room != null)
-                    _seen.Add(room.Pointer);
                 var p = player.transform.position;
+                if (room != null)
+                {
+                    _seen.Add(room.Pointer);
+                    if (!_stoodY.ContainsKey(room.Pointer))
+                        _stoodY[room.Pointer] = p.y;
+                }
                 var dot = new Dot
                 {
                     X = p.x, Y = p.y, Z = p.z, Me = isMe, Name = player.playerNick,
@@ -204,7 +212,7 @@ namespace InvokyrMinimap
             foreach (var room in _rooms)
             {
                 if (Visible(room) && _queued.Add(room.Ptr))
-                    _jobs.Enqueue(new ScanJob { Room = room });
+                    _jobs.Enqueue(new ScanJob { Room = room, Stood = _stoodY.TryGetValue(room.Ptr, out var stood) ? stood : (float?)null });
             }
 
             _idols.Clear();
@@ -330,13 +338,17 @@ namespace InvokyrMinimap
                     job.Samples.Clear();
                     job.Ys.Clear();
                     job.Lowest.Clear();
+                    job.Near.Clear();
                 }
                 if (!job.Sampled)
                 {
                     if (job.Iz > FloorGrid.Index(b.MaxZ))
                     {
                         job.Sampled = true;
-                        job.Level = FloorClassifier.Level(job.Lowest);
+                        job.Level = FloorClassifier.Level(job.Lowest, job.Near);
+                        var lowest = FloorClassifier.Level(job.Lowest);
+                        if (Math.Abs(job.Level - lowest) > FloorGrid.FloorGap)
+                            Diagnose($"room {job.Room.Id}: floor set from where players stood ({job.Level:0.0}), lowest surface was {lowest:0.0}");
                         continue;
                     }
                     SampleCell(job, b);
@@ -371,14 +383,20 @@ namespace InvokyrMinimap
             var n = Physics.RaycastNonAlloc(new Ray(new Vector3(x, top, z), Vector3.down), _hits, top - b.MinY + 1f, Mask(), QueryTriggerInteraction.Ignore);
             var start = job.Ys.Count;
             var lowest = float.MaxValue;
+            var near = float.MaxValue;
             for (var i = 0; i < n; i++)
             {
                 var hit = _hits[i];
                 if (hit.normal.y < 0.7f)
                     continue;
-                job.Ys.Add(hit.point.y);
-                lowest = Math.Min(lowest, hit.point.y);
+                var hy = hit.point.y;
+                job.Ys.Add(hy);
+                lowest = Math.Min(lowest, hy);
+                if (job.Stood is float stood && Math.Abs(hy - stood) < Math.Abs(near - stood))
+                    near = hy;
             }
+            if (job.Stood is float st && Math.Abs(near - st) <= FloorClassifier.StoodRange)
+                job.Near.Add(near);
             job.Samples.Add(new Sample { Ix = job.Ix, Iz = job.Iz, Start = start, Count = job.Ys.Count - start });
             if (lowest < float.MaxValue)
                 job.Lowest.Add(lowest);
@@ -533,7 +551,7 @@ namespace InvokyrMinimap
 
             Upload(raster, texture);
             GUI.DrawTexture(new Rect(screen.X - 2f, screen.Y - 2f, screen.W + 4f, screen.H + 4f), _frame);
-            GUI.DrawTexture(new Rect(screen.X, screen.Y, screen.W, screen.H), _panel);
+            GUI.DrawTexture(new Rect(screen.X, screen.Y, screen.W, screen.H), Panel());
             GUI.DrawTexture(new Rect(screen.X, screen.Y, screen.W, screen.H), texture);
 
             if (!names)
@@ -587,9 +605,18 @@ namespace InvokyrMinimap
                 return;
             _panel = Solid(new Color(0.05f, 0.03f, 0.06f, 0.72f));
             _frame = Solid(new Color(0.94f, 0.78f, 0.37f, 0.9f));
+            _blackPanel = Solid(new Color(0f, 0f, 0f, 0.95f));
+            _tanPanel = Solid(new Color(0.8f, 0.66f, 0.38f, 0.9f));
             _nameStyle = new GUIStyle { fontSize = 16, fontStyle = FontStyle.Bold };
             _nameStyle.normal.textColor = new Color(0.35f, 0.9f, 1f, 1f);
         }
+
+        private Texture2D Panel() => Plugin.Background.Value switch
+        {
+            MapBackground.Black => _blackPanel,
+            MapBackground.Tan => _tanPanel,
+            _ => _panel,
+        };
 
         private static Texture2D Solid(Color color)
         {

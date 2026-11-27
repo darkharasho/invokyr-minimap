@@ -128,6 +128,17 @@ namespace InvokyrMinimap
     {
         public const float Below = 0.6f, Above = 1.0f;
 
+        /// <summary>How far a surface may be from where a player stood and still count as the room's floor.</summary>
+        public const float StoodRange = 1.5f;
+
+        /// <summary>
+        /// The box's floor level. <paramref name="nearStood"/> holds, per spot, the surface closest to where a player stood
+        /// in the room; when enough spots have one, that is the floor (a box reaching down into the room below would
+        /// otherwise take the lower floor). Otherwise the median lowest hit.
+        /// </summary>
+        public static float Level(List<float> lowestHits, List<float> nearStood) =>
+            nearStood.Count >= 3 && nearStood.Count * 4 >= lowestHits.Count ? Level(nearStood) : Level(lowestHits);
+
         public static float Level(List<float> lowestHits)
         {
             if (lowestHits.Count == 0)
