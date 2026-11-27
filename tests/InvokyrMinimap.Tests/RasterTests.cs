@@ -87,3 +87,41 @@ public class MapPainterTests
         Assert.Equal(MapPainter.OtherFloor, raster.Get(5, 5));
     }
 }
+
+public class OutlineTests
+{
+    // Two 4 m rooms side by side along X (room 1 west of x=0, room 2 east), north-up, 4 px per metre.
+    private static Raster PaintTwoRooms()
+    {
+        var grid = new FloorGrid();
+        for (var x = FloorGrid.Index(-4f); x < FloorGrid.Index(4f); x++)
+            for (var z = FloorGrid.Index(-2f); z < FloorGrid.Index(2f); z++)
+                grid.Add(x, z, new Cell { Kind = CellKind.Floor, Y = 0f, Depth = 1f, Room = (ushort)(x < 0 ? 1 : 2) });
+        var raster = new Raster(48, 48);
+        MapPainter.Paint(raster, grid, new MapView(new Box(0, 0, 48, 48), 0f, 0f, 4f), 0f, 1f);
+        return raster;
+    }
+
+    [Fact]
+    public void EdgeNextToNothingIsOutlined()
+    {
+        var r = PaintTwoRooms();
+        Assert.Equal(MapPainter.Edge, r.Get(8, 20));   // x = -3.9 m, the west edge
+        Assert.Equal(MapPainter.Edge, r.Get(20, 16));  // z = +2 m, the north edge
+    }
+
+    [Fact]
+    public void BorderBetweenRoomsIsOutlined()
+    {
+        var r = PaintTwoRooms();
+        Assert.Equal(MapPainter.Edge, r.Get(24, 20));  // x = 0, between the rooms
+    }
+
+    [Fact]
+    public void InsideARoomIsPlainFloor()
+    {
+        var r = PaintTwoRooms();
+        Assert.Equal(MapPainter.Floor, r.Get(16, 22));
+        Assert.Equal(MapPainter.Floor, r.Get(32, 22));
+    }
+}

@@ -10,7 +10,7 @@ namespace InvokyrMinimap
     {
         public const string PluginGuid = "com.darkharasho.invokyr.minimap";
         public const string PluginName = "InvokyrMinimap";
-        public const string PluginVersion = "1.1.0";
+        public const string PluginVersion = "1.1.1";
 
         internal static new ManualLogSource Log;
         internal static ConfigEntry<bool> Enabled, ShowMinimap, RevealAll, ShowIdols, ShowMonsters, HideWhenCursorFree, RotateWithView;

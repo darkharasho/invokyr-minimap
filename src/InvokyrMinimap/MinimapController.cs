@@ -33,6 +33,7 @@ namespace InvokyrMinimap
         private sealed class RoomInfo
         {
             public IntPtr Ptr;
+            public ushort Id;
             public byte Flags;
             public readonly List<Shape> Boxes = new List<Shape>();
         }
@@ -57,12 +58,37 @@ namespace InvokyrMinimap
         private struct Dot
         {
             public float X, Y, Z, Fx, Fz;
-            public bool Me;
+            public bool Me, Alive;
             public string Name;
+        }
+
+        // Two player objects with the same name: keep the living one (or yours) so a stale copy isn't drawn.
+        private void AddPlayer(Dot dot)
+        {
+            for (var i = 0; i < _players.Count; i++)
+            {
+                var other = _players[i];
+                if (other.Name != dot.Name || string.IsNullOrEmpty(dot.Name) || other.Alive == dot.Alive && !other.Me && !dot.Me)
+                    continue;
+                Diagnose($"two player objects named '{dot.Name}' (alive {other.Alive}/{dot.Alive}); drawing one");
+                if (!other.Me && (dot.Me || dot.Alive && !other.Alive))
+                    _players[i] = dot;
+                return;
+            }
+            _players.Add(dot);
+        }
+
+        private readonly HashSet<string> _diagnosed = new HashSet<string>();
+
+        private void Diagnose(string message)
+        {
+            if (_diagnosed.Count < 20 && _diagnosed.Add(message))
+                Plugin.Log.LogInfo("Minimap: " + message);
         }
 
         private readonly HashSet<IntPtr> _seen = new HashSet<IntPtr>();
         private readonly HashSet<IntPtr> _queued = new HashSet<IntPtr>();
+        private readonly Dictionary<IntPtr, ushort> _roomIds = new Dictionary<IntPtr, ushort>();
         private readonly Queue<ScanJob> _jobs = new Queue<ScanJob>();
         private readonly FloorGrid _grid = new FloorGrid();
         private List<RoomInfo> _rooms = new List<RoomInfo>();
@@ -118,7 +144,10 @@ namespace InvokyrMinimap
             if (scene != _sceneHandle || _revealAll != Plugin.RevealAll.Value)
             {
                 if (scene != _sceneHandle)
+                {
                     _seen.Clear();
+                    _roomIds.Clear();
+                }
                 _sceneHandle = scene;
                 _revealAll = Plugin.RevealAll.Value;
                 _rooms.Clear();
@@ -143,11 +172,22 @@ namespace InvokyrMinimap
                 var player = _playerBuffer[i];
                 if (player == null)
                     continue;
+                var isMe = player.Pointer == me.Pointer;
+                // A player object left behind (e.g. by a revive) is switched off; don't draw it.
+                if (!isMe && !player.gameObject.activeInHierarchy)
+                {
+                    Diagnose($"inactive player object '{player.playerNick}' (netId {player.netId}) skipped");
+                    continue;
+                }
                 var room = player.currentRoom;
                 if (room != null)
                     _seen.Add(room.Pointer);
                 var p = player.transform.position;
-                var dot = new Dot { X = p.x, Y = p.y, Z = p.z, Me = player.Pointer == me.Pointer, Name = player.playerNick };
+                var dot = new Dot
+                {
+                    X = p.x, Y = p.y, Z = p.z, Me = isMe, Name = player.playerNick,
+                    Alive = player.CliCurrentHealth > 0,
+                };
                 if (dot.Me)
                 {
                     var f = LookDirection(player);
@@ -155,7 +195,10 @@ namespace InvokyrMinimap
                     dot.Fz = f.z;
                     _me = dot;
                 }
-                _players.Add(dot);
+                var visual = player.visual;
+                if (visual != null && (visual.position - p).sqrMagnitude > 16f)
+                    Diagnose($"'{dot.Name}' body is over 4 m from its root");
+                AddPlayer(dot);
             }
 
             foreach (var room in _rooms)
@@ -211,7 +254,7 @@ namespace InvokyrMinimap
             return f.sqrMagnitude > 1e-6f ? f.normalized : Vector3.forward;
         }
 
-        private static List<RoomInfo> ReadRooms()
+        private List<RoomInfo> ReadRooms()
         {
             var result = new List<RoomInfo>();
             var rooms = Room.GetAll();
@@ -222,7 +265,12 @@ namespace InvokyrMinimap
                     continue;
                 var type = room.roomType;
                 var flags = (type & ERoomType.EndRoom) != 0 ? MapPainter.Exit : (type & ERoomType.ShopRoom) != 0 ? MapPainter.Shop : (byte)0;
-                var info = new RoomInfo { Ptr = room.Pointer, Flags = flags };
+                if (!_roomIds.TryGetValue(room.Pointer, out var id))
+                {
+                    id = (ushort)(_roomIds.Count + 1);
+                    _roomIds[room.Pointer] = id;
+                }
+                var info = new RoomInfo { Ptr = room.Pointer, Id = id, Flags = flags };
                 var bounds = room.roomBounds;
                 for (var b = 0; bounds != null && b < bounds.Count; b++)
                 {
@@ -350,7 +398,7 @@ namespace InvokyrMinimap
             if (kind != CellKind.Floor)
                 y = job.Level;
             var depth = Math.Min(Math.Min(x - b.MinX, b.MaxX - x), Math.Min(z - b.MinZ, b.MaxZ - z));
-            _grid.Add(s.Ix, s.Iz, new Cell { Kind = kind, Flags = job.Room.Flags, Y = y, Depth = depth });
+            _grid.Add(s.Ix, s.Iz, new Cell { Kind = kind, Flags = job.Room.Flags, Room = job.Room.Id, Y = y, Depth = depth });
             return true;
         }
 
@@ -366,7 +414,7 @@ namespace InvokyrMinimap
             {
                 for (var iz = FloorGrid.Index(b.MinZ); iz <= FloorGrid.Index(b.MaxZ); iz++)
                     for (var ix = FloorGrid.Index(b.MinX); ix <= FloorGrid.Index(b.MaxX); ix++)
-                        _grid.Add(ix, iz, new Cell { Kind = CellKind.Floor, Flags = room.Flags, Y = b.MinY, Depth = 0f });
+                        _grid.Add(ix, iz, new Cell { Kind = CellKind.Floor, Flags = room.Flags, Room = room.Id, Y = b.MinY, Depth = 0f });
             }
         }
 
@@ -454,8 +502,8 @@ namespace InvokyrMinimap
 
         private void Draw(Box screen, MapView view, Raster raster, Texture2D texture, bool names)
         {
-            MapPainter.Paint(raster, _grid, view, _me.Y);
             var k = raster.Width / screen.W; // raster pixels per GUI pixel
+            MapPainter.Paint(raster, _grid, view, _me.Y, 1.2f * k);
 
             foreach (var p in _monsters)
                 Mark(view, p.x, p.z, (cx, cy) => raster.FillSquare(cx, cy, 3.5f * k, MonsterColor));

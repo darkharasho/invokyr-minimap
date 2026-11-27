@@ -10,6 +10,7 @@ namespace InvokyrMinimap
     {
         public CellKind Kind;
         public byte Flags;   // MapPainter.Exit / MapPainter.Shop
+        public ushort Room;  // which room claimed it, for outlines between rooms
         public float Y;      // floor height
         public float Depth;  // how far inside its room's box the spot is; the deepest room owns it
     }
